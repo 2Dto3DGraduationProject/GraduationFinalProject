@@ -1,1 +1,7 @@
 .venv/ 
+*.pth
+*.ply
+Output_Models/
+__pycache__/
+*.pt
+checkpoints/

@@ -1,0 +1,22 @@
+{
+    // Use IntelliSense to learn about possible attributes.
+    // Hover to view descriptions of existing attributes.
+    // For more information, visit: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+
+
+        {
+            "name": "Run main.py",
+            "type": "python",
+            "request": "launch",
+            "program": "${workspaceFolder}/main.py",
+            "args": [
+            "--image_dir", "C:/GraduationFinalProject/3DImage_project/input_Images",
+            "--output_dir", "C:/GraduationFinalProject/3DImage_project/Output_Models",
+            "--colmap_bin", "C:/COLMAP/COLMAP.bat",
+            "--no_gpu"
+            ]
+        }
+    ]
+}

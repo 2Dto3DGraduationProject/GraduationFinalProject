@@ -25,7 +25,7 @@ run(f"colmap feature_extractor "
 print("[COLMAP] Sequential matching...")
 run(f"colmap sequential_matcher "
     f"--database_path {db} "
-    f"--SequentialMatching.overlap 10")
+    f"--SequentialMatching.overlap 12")
 
 print("[COLMAP] Exhaustive matching...")
 run(f"colmap exhaustive_matcher --database_path {db}")

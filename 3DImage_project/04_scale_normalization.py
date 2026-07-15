@@ -161,8 +161,8 @@ if __name__ == "__main__":
     parser.add_argument("--colmap_dir",    required=True)
     parser.add_argument("--depth_dir",     required=True)
     parser.add_argument("--output_dir",    required=True)
-    parser.add_argument("--min_track_len", type=int, default=3)
-    parser.add_argument("--min_obs",       type=int, default=5)
+    parser.add_argument("--min_track_len", type=int, default=5)
+    parser.add_argument("--min_obs",       type=int, default=15)
     args = parser.parse_args()
 
     normalize_depths(args.colmap_dir, args.depth_dir, args.output_dir,

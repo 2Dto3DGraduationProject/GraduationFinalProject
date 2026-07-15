@@ -4,10 +4,10 @@ STEP 5: Incremental Point Cloud Fusion
 Strategy:
   - Frame 0 defines world origin and base point cloud
   - For each subsequent frame, unproject depth -> 3D points in world space
-  - Only points that are NOT already in the base cloud are added (spatial hash dedup)
+  - Only points that are NOT already in the base cloud are added 
   - No voxel grid RAM explosion, no TSDF marching cubes artifacts
 
-Output: tsdf_mesh.ply  (named for pipeline compatibility, actually a colored point cloud PLY)
+Output: tsdf_mesh.ply  
 """
 
 import argparse
@@ -15,7 +15,7 @@ import numpy as np
 from pathlib import Path
 from PIL import Image
 import open3d as o3d
-from scipy.ndimage import binary_dilation
+from scipy.ndimage import binary_dilation, binary_erosion
 
 
 # ---------------------------------------------------------------------------
@@ -27,6 +27,7 @@ def load_mask(mask_dir: Path, stem: str, h: int, w: int) -> np.ndarray:
     p = mask_dir / f"{stem}_mask.png"
     if p.exists():
         m = np.array(Image.open(p).convert("L")) > 127
+        m = binary_erosion(m, iterations=15)
         return m
     # fallback: all pixels valid
     return np.ones((h, w), dtype=bool)
@@ -36,44 +37,42 @@ def load_mask(mask_dir: Path, stem: str, h: int, w: int) -> np.ndarray:
 # Unprojection: depth map -> 3D points in world space
 # ---------------------------------------------------------------------------
 
-def unproject(depth_im: np.ndarray,
-              K: np.ndarray,
-              c2w: np.ndarray,
-              mask: np.ndarray,
-              depth_min: float,
-              depth_max: float) -> tuple[np.ndarray, np.ndarray]:
-    """
-    Unproject valid depth pixels to world-space XYZ.
-    Returns:
-        pts_world : (N, 3) float32
-        pix_yx    : (N, 2) int32  — row, col indices for color sampling
-    """
-    h, w = depth_im.shape
-    ys, xs = np.meshgrid(np.arange(h), np.arange(w), indexing='ij')  # (H, W)
-
+def unproject_optimized(depth_im: np.ndarray,
+                        K: np.ndarray,
+                        c2w: np.ndarray,
+                        mask: np.ndarray,
+                        depth_min: float,
+                        depth_max: float) -> tuple[np.ndarray, np.ndarray]:
+    
+    # 1. Meshgrid yerine doğrudan maske ve derinlik koşullarını kontrol et
     valid = mask & (depth_im > depth_min) & (depth_im < depth_max)
-    if not valid.any():
+    
+    # 2. Sadece geçerli piksellerin koordinatlarını al 
+    yv, xv = np.nonzero(valid)
+    
+    if len(yv) == 0:
         return np.empty((0, 3), dtype=np.float32), np.empty((0, 2), dtype=np.int32)
 
-    z  = depth_im[valid].astype(np.float32)
-    xv = xs[valid].astype(np.float32)
-    yv = ys[valid].astype(np.float32)
+    z = depth_im[yv, xv].astype(np.float32)
 
     fx, fy = float(K[0, 0]), float(K[1, 1])
     cx, cy = float(K[0, 2]), float(K[1, 2])
 
-    X = (xv - cx) / fx * z
-    Y = (yv - cy) / fy * z
-    Z = z
+    # 3. 3D Kamera koordinatları
+    X = (xv.astype(np.float32) - cx) / fx * z
+    Y = (yv.astype(np.float32) - cy) / fy * z
+    pts_cam = np.stack([X, Y, z], axis=-1)  # (N, 3)
 
-    pts_cam = np.stack([X, Y, Z], axis=1)          # (N, 3)
-    ones    = np.ones((pts_cam.shape[0], 1), dtype=np.float32)
-    pts_h   = np.hstack([pts_cam, ones])            # (N, 4)
-    pts_world = (c2w.astype(np.float32) @ pts_h.T).T[:, :3]  # (N, 3)
+    # 4. Homojen matris (ones) KULLANMADAN doğrudan Rotasyon ve Çeviri (Çok daha hızlı)
+    R = c2w[:3, :3].astype(np.float32)
+    t = c2w[:3, 3].astype(np.float32)
+    
+    pts_world = pts_cam @ R.T + t  # (N, 3)
 
-    pix_yx = np.stack([yv.astype(np.int32), xv.astype(np.int32)], axis=1)
+    # 5. Renk örneklemesi için orijinal piksel koordinatları
+    pix_yx = np.stack([yv.astype(np.int32), xv.astype(np.int32)], axis=-1)
+    
     return pts_world, pix_yx
-
 
 # ---------------------------------------------------------------------------
 # Spatial hash deduplication
@@ -164,113 +163,91 @@ def save_point_cloud_ply(pts: np.ndarray,
 # Main
 # ---------------------------------------------------------------------------
 
-def run_incremental_fusion(poses_npz: str,
-                            image_dir: str,
-                            depth_dir: str,
-                            mask_dir: str,
-                            output_dir: str,
-                            dedup_cell: float = 0.008,
-                            depth_min: float = 0.1,
-                            depth_max: float = 10.0,
-                            scale_factor: float = 0.01):
+def run_incremental_fusion(poses_npz: str, image_dir: str, depth_dir: str, mask_dir: str, output_dir: str, dedup_cell: float = 0.008, depth_min: float = 0.1, depth_max: float = 10.0, scale_factor: float = 0.01):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    image_dir  = Path(image_dir)
-    depth_dir  = Path(depth_dir)
-    mask_dir   = Path(mask_dir)
+    image_dir, depth_dir, mask_dir = Path(image_dir), Path(depth_dir), Path(mask_dir)
 
-    data        = np.load(poses_npz, allow_pickle=True)
+    data = np.load(poses_npz, allow_pickle=True)
     image_names = data["image_names"].tolist()
-    poses_c2w   = data["poses_c2w"].astype(np.float64)   # (N, 4, 4)
-    intrinsics  = data["intrinsics"].astype(np.float64)   # (N, 3, 3)
-    N           = len(image_names)
+    poses_c2w = data["poses_c2w"].astype(np.float64)
+    intrinsics = data["intrinsics"].astype(np.float64)
+    N = len(image_names)
 
-    print(f"[Fusion] {N} frames | dedup_cell={dedup_cell}m | depth [{depth_min}, {depth_max}]m")
-
-    all_pts  : list[np.ndarray] = []
-    all_cols : list[np.ndarray] = []
-    occupied : set              = set()   # spatial hash of occupied cells
+    print(f"[Fusion] TSDF Hacimsel Birleştirme Başlatılıyor... (Hassasiyet: {dedup_cell}m)")
+    
+    # TSDF Motoru: Üst üste binen katmanları matematiksel olarak ortalar ve tek bir yüzeye çeker.
+    volume = o3d.pipelines.integration.ScalableTSDFVolume(
+        voxel_length=dedup_cell,
+        sdf_trunc=dedup_cell * 25,
+        color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
+    )
 
     for i, name in enumerate(image_names):
-        stem       = Path(name).stem
-        depth_path = depth_dir  / f"{stem}_depth_metric.npy"
-        color_path = image_dir  / name
+        stem = Path(name).stem
+        depth_path = depth_dir / f"{stem}_depth_metric.npy"
+        color_path = image_dir / name
 
         if not depth_path.exists() or not color_path.exists():
-            print(f"[Fusion] [{i+1}/{N}] SKIP (missing file): {name}")
             continue
 
         depth_im = np.load(depth_path).astype(np.float32)
-        color_im = np.array(Image.open(color_path).convert("RGB"), dtype=np.uint8)
-        h, w     = depth_im.shape
+        color_im = np.array(Image.open(color_path).convert("RGB"))
+        h, w = depth_im.shape
 
+        # Sadece arkaplanı silinmiş maskeli alanı al
         mask = load_mask(mask_dir, stem, h, w)
+        depth_im[~mask] = 0.0  
+        
+        # Kamera arkasına uzanan hatalı derinlikleri uzay boşluğuna at (1.5m sınırı)
+        depth_im[depth_im > depth_max] = 0.0
 
-        pts_world, pix_yx = unproject(
-            depth_im, intrinsics[i], poses_c2w[i],
-            mask, depth_min, depth_max
+        color_o3d = o3d.geometry.Image(color_im)
+        depth_o3d = o3d.geometry.Image(depth_im)
+        
+        rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+            color_o3d, depth_o3d, 
+            depth_scale=1.0, 
+            depth_trunc=depth_max, 
+            convert_rgb_to_intensity=False
         )
 
-        if pts_world.shape[0] == 0:
-            print(f"[Fusion] [{i+1}/{N}] {name} | 0 valid points, skipped")
-            continue
+        K = intrinsics[i]
+        intrinsic_o3d = o3d.camera.PinholeCameraIntrinsic(
+            width=w, height=h,
+            fx=K[0,0], fy=K[1,1], cx=K[0,2], cy=K[1,2]
+        )
+        
+        extrinsic = np.linalg.inv(poses_c2w[i]) # w2c
+        volume.integrate(rgbd, intrinsic_o3d, extrinsic)
+        print(f"[Fusion] [{i+1}/{N}] {name} hacme eritildi.")
 
-        # Frame 0: all points go in as base cloud
-        if i == 0:
-            new_pts  = pts_world
-            new_mask_bool = np.ones(pts_world.shape[0], dtype=bool)
-            keys     = voxel_key(pts_world, dedup_cell)
-            occupied = set(map(tuple, keys))
-            print(f"[Fusion] [{i+1}/{N}] {name} | BASE: {len(new_pts):,} pts -> occupied cells: {len(occupied):,}")
-        else:
-            keys      = voxel_key(pts_world, dedup_cell)
-            key_tuples = list(map(tuple, keys))
-            new_mask_bool = np.array([k not in occupied for k in key_tuples], dtype=bool)
-            new_pts   = pts_world[new_mask_bool]
-            new_keys  = {k for k, m in zip(key_tuples, new_mask_bool) if m}
-            occupied |= new_keys
-            print(f"[Fusion] [{i+1}/{N}] {name} | "
-                  f"total={pts_world.shape[0]:,}  new={new_pts.shape[0]:,}  "
-                  f"skipped={pts_world.shape[0]-new_pts.shape[0]:,}  "
-                  f"occupied={len(occupied):,}")
+    print("\n[Fusion] Katmanlar eritilip TEK KATMANLI nokta bulutu çıkarılıyor...")
+    
+    # İŞTE BURASI: Mesh değil, TSDF'nin erittiği yapıdan sadece nokta bulutunu çekiyoruz.
+    pcd = volume.extract_point_cloud()
 
-        if new_pts.shape[0] == 0:
-            continue
-
-        new_cols = color_im[pix_yx[new_mask_bool, 0], pix_yx[new_mask_bool, 1]]  # (M, 3)
-
-        all_pts.append(new_pts)
-        all_cols.append(new_cols)
-
-    if not all_pts:
-        print("[Fusion] ERROR: No points accumulated. Check depth maps and masks.")
+    if len(pcd.points) == 0:
+        print("[Fusion] HATA: Nokta bulutu oluşturulamadı.")
         return
 
-    pts_full  = np.vstack(all_pts).astype(np.float64)
-    cols_full = np.vstack(all_cols).astype(np.float64)
-    print(f"\n[Fusion] Total before post-proc: {len(pts_full):,} points")
+    print(f"[Fusion] Katmanlardan arındırılmış net nokta sayısı: {len(pcd.points):,}")
 
-    # --- Build Open3D PCD ---
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(pts_full)
-    pcd.colors = o3d.utility.Vector3dVector(cols_full / 255.0)
+    # Uçuşan son gürültüleri tıraşla
+    pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=100, std_ratio=1.0)
+    pcd, _ = pcd.remove_radius_outlier(nb_points=10, radius=0.03)
 
-    # --- Statistical outlier removal ---
-    pcd = remove_statistical_outliers(pcd, nb_neighbors=20, std_ratio=2.0)
-    print(f"[Fusion] After outlier removal: {len(pcd.points):,} points")
-
-    # --- Upright rotation ---
+    # Hizalama ve Oyun Motoru Ölçeği
     pcd = orient_upright(pcd, poses_c2w)
-
-    # --- Scale ---
     pcd.scale(scale_factor, center=(0, 0, 0))
-    print(f"[Fusion] Scale factor applied: {scale_factor}")
 
-    # --- Save ---
-    out_path = output_dir / "tsdf_mesh.ply"   # name kept for pipeline compat
+    out_path = output_dir / "tsdf_mesh.ply"
     o3d.io.write_point_cloud(str(out_path), pcd)
-    print(f"[Fusion] Done. Points: {len(pcd.points):,}")
-    print(f"[Fusion] Output -> {out_path}")
+    print(f"[Fusion] Çıktı Kaydedildi -> {out_path}")
+
+    print("[Görselleştirme] Üst üste binmeleri eritilmiş Nokta Bulutu Önizlemesi...")
+    o3d.visualization.draw_geometries([pcd], window_name="TSDF Nokta Bulutu (Kaynaşmış)", width=1280, height=720)
+
     return str(out_path)
 
 
@@ -281,8 +258,8 @@ if __name__ == "__main__":
     parser.add_argument("--depth_dir",   required=True)
     parser.add_argument("--mask_dir",    required=True)
     parser.add_argument("--output_dir",  required=True)
-    parser.add_argument("--dedup_cell",  type=float, default=0.008,
-                        help="Dedup voxel cell size in meters (default: 0.008 = 8mm)")
+    parser.add_argument("--dedup_cell",  type=float, default=0.015,
+                        help="Dedup voxel cell size in meters (default: 0.015 = 15mm)")
     parser.add_argument("--depth_min",   type=float, default=0.1)
     parser.add_argument("--depth_max",   type=float, default=10.0)
     parser.add_argument("--scale",       type=float, default=0.01,

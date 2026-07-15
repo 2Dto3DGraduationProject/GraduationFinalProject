@@ -88,6 +88,17 @@ def poisson_from_ply(input_ply, output_dir,
     print(f"[Poisson] Saved -> {out_path}")
 
     np.save(output_dir / "poisson_densities.npy", np.asarray(densities))
+
+
+    # --- ANLIK MESH TOPOLOJİSİ GÖRÜNTÜLEME ---
+    print("[Görselleştirme] Üretilen Poisson Mesh topolojisi gösteriliyor...")
+    poisson_mesh.compute_vertex_normals() # Gölgelendirmenin düzgün görünmesi için
+    o3d.visualization.draw_geometries(
+        [poisson_mesh], 
+        window_name="Nihai Poisson Mesh Topolojisi", 
+        width=1024, height=768,
+        mesh_show_wireframe=True # Tel kafes modunu açarak topolojiyi (poligonları) net görmeni sağlar
+    )
     return str(out_path)
 
 

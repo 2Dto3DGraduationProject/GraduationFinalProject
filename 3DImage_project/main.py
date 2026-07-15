@@ -26,6 +26,12 @@ def main():
     args, _ = parser.parse_known_args()
 
     out = Path(args.output_dir)
+
+    import shutil
+    if out.exists():
+        shutil.rmtree(out, ignore_errors=True)
+    out.mkdir(parents=True, exist_ok=True)
+    
     sd  = Path(__file__).resolve().parent   # scripts dir
 
     cfg = argparse.Namespace(

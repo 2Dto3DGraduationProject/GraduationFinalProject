@@ -17,6 +17,8 @@ import numpy as np
 from PIL import Image
 import torch
 from scipy.ndimage import binary_erosion, binary_dilation
+import cv2
+
 
 try:
     from segment_anything import sam_model_registry, SamAutomaticMaskGenerator
@@ -89,6 +91,12 @@ def run_sam_segmentation(image_dir, output_dir, model_type="vit_b", device="cuda
     print(f"[Segmentation] SAM segmentasyonu başlıyor... ({len(image_paths)} görsel)")
 
     for idx, img_path in enumerate(image_paths):
+        img_cv = cv2.imread(str(img_path))
+
+        # Bilateral Filtre ile dokuyu sil, kenarları koru (Odak/Doku problemleri için)
+        smoothed_img = cv2.bilateralFilter(img_cv, 15, 100, 100)
+
+
         img_np = np.array(Image.open(img_path).convert("RGB"))
         h, w = img_np.shape[:2]
 
@@ -158,6 +166,9 @@ def run_otsu_threshold(image_dir, output_dir):
     print(f"[Segmentation] Otsu Threshold masking başlıyor... ({len(image_paths)} görsel)")
 
     for idx, img_path in enumerate(image_paths):
+
+        
+
         gray = np.array(Image.open(img_path).convert("L"))
         
         # Otsu Threshold Hesaplaması
